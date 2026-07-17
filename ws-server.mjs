@@ -1,9 +1,18 @@
 import { spawn } from "child_process";
+import { existsSync } from "fs";
+import { join } from "path";
 import readline from "readline";
 import { WebSocketServer } from "ws";
 import chalk from "chalk";
 
 const PORT = 9090
+const adbCandidates = [
+    process.env.ADB_PATH,
+    process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, "Android", "Sdk", "platform-tools", "adb.exe"),
+    process.env.ANDROID_HOME && join(process.env.ANDROID_HOME, "platform-tools", "adb.exe"),
+    process.env.ANDROID_SDK_ROOT && join(process.env.ANDROID_SDK_ROOT, "platform-tools", "adb.exe")
+].filter(Boolean);
+const ADB = adbCandidates.find((candidate) => existsSync(candidate)) ?? "adb";
 
 let connected = false;
 const logUtils = {
@@ -83,7 +92,9 @@ wss.on("connection", async (ws) => {
     }
 });
 
-spawn("adb", ["reverse", `tcp:${PORT}`, `tcp:${PORT}`], { stdio: "ignore" }).on("exit", (code) => {
+spawn(ADB, ["reverse", `tcp:${PORT}`, `tcp:${PORT}`], { stdio: "ignore" }).on("error", (error) => {
+    logUtils.error(`Port forwarding port ${PORT} with adb failed: ${error.message}, aliucord may not load`);
+}).on("exit", (code) => {
     if (code !== 0) logUtils.error(`Port forwarding port ${PORT} with adb exited with code ${code}, aliucord may not load`);
     else logUtils.success(`Successfully forwarded port ${PORT} to phone with adb`);
 });

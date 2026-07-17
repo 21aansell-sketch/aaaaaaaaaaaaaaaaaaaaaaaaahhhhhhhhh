@@ -4,6 +4,7 @@
         "target": "ESNext",
         "module": "ESNext",
         "moduleResolution": "node",
+        "ignoreDeprecations": "6.0",
         "esModuleInterop": true,
         "jsx": "react-native",
         "allowJs": true
