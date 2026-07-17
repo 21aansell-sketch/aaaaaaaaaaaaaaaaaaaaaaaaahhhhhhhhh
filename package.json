@@ -6,16 +6,17 @@
 	},
 	"dependencies": {
 		"@nexpid/vdp-shared": "^1.0.2",
-		"@swc/helpers": "^0.4.14"
+		"@swc/helpers": "^0.5.23"
 	},
 	"devDependencies": {
-		"@rollup/plugin-commonjs": "^24.0.0",
-		"@rollup/plugin-node-resolve": "^15.0.1",
+		"@rollup/plugin-commonjs": "^29.0.3",
+		"@rollup/plugin-node-resolve": "^16.0.1",
 		"@swc/core": "^1.3.35",
 		"chalk": "^5.0.1",
-		"esbuild": "^0.16.14",
-		"rollup": "^3.9.1",
-		"rollup-plugin-esbuild": "^5.0.0",
+		"esbuild": "^0.28.1",
+		"rollup": "4.62.2",
+		"rollup-plugin-esbuild": "^6.2.1.",
+		"typescript": "^7.0.2",
 		"vendetta-types": "^2.3.5",
 		"ws": "^8.6.0"
 	},
