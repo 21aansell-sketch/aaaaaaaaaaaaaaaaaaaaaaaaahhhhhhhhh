@@ -1,7 +1,7 @@
 # Hide Messages
-A Vendetta plugin for hiding messages locally.
+A Vendetta plugin for editng messages locally.
 
-https://mystravil.github.io/vendetta-plugins/HideMessages/
+i used ai
 
 # BetterBetterChatGestures
 A Fork of [BetterChatGestures](https://github.com/acquitelol/better-chat-gestures), mainly fixes bugs.
