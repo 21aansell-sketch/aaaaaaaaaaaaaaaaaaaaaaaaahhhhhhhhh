@@ -1,146 +1,145 @@
-import {findByProps} from "@vendetta/metro";
-import {FluxDispatcher} from "@vendetta/metro/common";
-import {after, before} from "@vendetta/patcher";
-import {React, ReactNative, stylesheet} from "@vendetta/metro/common";
-import {getAssetIDByName as getAssetId} from "@vendetta/ui/assets"
-import {findInReactTree} from "@vendetta/utils"
-import Settings from "./components/Settings";
-import {storage} from "@vendetta/plugin";
-import {logger} from "@vendetta";
-import {semanticColors} from "@vendetta/ui";
+import { findByProps } from "@vendetta/metro";
+import { FluxDispatcher, React, ReactNative, stylesheet } from "@vendetta/metro/common";
+import { after, before } from "@vendetta/patcher";
+import { getAssetIDByName as getAssetId } from "@vendetta/ui/assets";
+import { semanticColors, showInputAlert } from "@vendetta/ui";
+import { storage } from "@vendetta/plugin";
 
-
-let patches = [];
-let pendingDeletes = new Set();
-
-function debugLog(...args) {
-    console.log("[HideMessages]", ...args);
-    logger.log("HideMessages:", ...args);
-}
-
-function debugError(...args) {
-    console.error("[HideMessages]", ...args);
-    logger.error("HideMessages:", ...args);
-}
-
-debugLog("module evaluated");
+let patches: (() => void)[] = [];
 
 const LazyActionSheet = findByProps("openLazy", "hideActionSheet");
-const {ActionSheetRow} = findByProps("ActionSheetRow") ?? {};
-const {FormRow} = findByProps("FormRow") ?? {};
+const { ActionSheetRow } = findByProps("ActionSheetRow") ?? {};
+const { FormRow } = findByProps("FormRow") ?? {};
+
+const MessageStore = findByProps("getMessage", "getMessages");
+
 const styles = stylesheet.createThemedStyleSheet({
     icon: {
         width: 24,
         height: 24,
-        tintColor: semanticColors.INTERACTIVE_NORMAL
-    }
+        tintColor: semanticColors.INTERACTIVE_NORMAL,
+    },
 });
 
-debugLog("module lookup complete", {
-    LazyActionSheet: Boolean(LazyActionSheet),
-    ActionSheetRow: Boolean(ActionSheetRow),
-    FormRow: Boolean(FormRow),
-    FluxDispatcher: Boolean(FluxDispatcher),
-    React: Boolean(React),
-    ReactNative: Boolean(ReactNative)
-});
+type LocalEdit = {
+    channelId: string;
+    messageId: string;
+    content: string;
+    updatedAt: number;
+};
 
-function ensureHiddenMessages() {
-    if (!storage.hiddenMessages || typeof storage.hiddenMessages !== "object" || Array.isArray(storage.hiddenMessages)) {
-        storage.hiddenMessages = {};
+function ensureLocalEdits(): Record<string, LocalEdit> {
+    if (
+        !storage.localEdits ||
+        typeof storage.localEdits !== "object" ||
+        Array.isArray(storage.localEdits)
+    ) {
+        storage.localEdits = {};
     }
 
-    return storage.hiddenMessages;
+    return storage.localEdits;
 }
 
-function getMessageKey(channelId, messageId) {
+function getChannelId(message: any): string | null {
+    return message?.channel_id ?? message?.channelId ?? null;
+}
+
+function getMessageKey(channelId: string | null, messageId: string | null): string | null {
     if (!channelId || !messageId) return null;
     return `${channelId}:${messageId}`;
 }
 
-function getMessageChannelId(message) {
-    return message?.channel_id ?? message?.channelId;
+function getKey(message: any): string | null {
+    return getMessageKey(getChannelId(message), message?.id ?? null);
 }
 
-function addHiddenMessage(message) {
-    const channelId = getMessageChannelId(message);
-    const key = getMessageKey(channelId, message?.id);
-    if (!key) {
-        debugError("Could not persist hidden message; missing ids", describeMessage(message));
-        return;
-    }
+function getLocalEdit(message: any): LocalEdit | undefined {
+    const key = getKey(message);
+    if (!key) return undefined;
 
-    const hiddenMessages = ensureHiddenMessages();
-    hiddenMessages[key] = {
+    return ensureLocalEdits()[key];
+}
+
+function hasLocalEdit(message: any): boolean {
+    return Boolean(getLocalEdit(message));
+}
+
+function saveLocalEdit(message: any, content: string) {
+    const channelId = getChannelId(message);
+    const messageId = message?.id;
+
+    const key = getMessageKey(channelId, messageId);
+
+    if (!key || !channelId || !messageId) return;
+
+    ensureLocalEdits()[key] = {
         channelId,
-        id: message.id,
-        hiddenAt: Date.now()
+        messageId,
+        content,
+        updatedAt: Date.now(),
     };
-    debugLog("Persisted hidden message", key, Object.keys(hiddenMessages).length);
 }
 
-function isHiddenMessage(message) {
-    const channelId = getMessageChannelId(message);
-    const key = getMessageKey(channelId, message?.id);
-    return Boolean(key && ensureHiddenMessages()[key]);
-}
-
-function dispatchDelete(channelId, id, reason) {
-    const key = getMessageKey(channelId, id);
+function removeLocalEdit(message: any) {
+    const key = getKey(message);
     if (!key) return;
 
-    if (pendingDeletes.has(key)) {
-        debugLog("Delete already pending", key, reason);
-        return;
-    }
-
-    pendingDeletes.add(key);
-    setTimeout(() => {
-        try {
-            debugLog("Dispatching persisted MESSAGE_DELETE", {key, reason});
-            FluxDispatcher.dispatch({
-                type: "MESSAGE_DELETE",
-                channelId,
-                id,
-                __vml_cleanup: true,
-                otherPluginBypass: true
-            });
-        } catch (error) {
-            debugError("Failed to dispatch persisted MESSAGE_DELETE", key, error);
-        } finally {
-            pendingDeletes.delete(key);
-        }
-    }, 0);
+    delete ensureLocalEdits()[key];
 }
 
-function dispatchDeleteForMessage(message, reason) {
-    dispatchDelete(getMessageChannelId(message), message?.id, reason);
+function applyLocalEdit(message: any): any {
+    if (!message) return message;
+
+    const edit = getLocalEdit(message);
+
+    if (!edit) return message;
+
+    // Don't mutate Discord's original object.
+    return {
+        ...message,
+        content: edit.content,
+    };
 }
 
-function replayHiddenMessages(reason) {
-    const hiddenMessages = ensureHiddenMessages();
-    const entries = Object.entries(hiddenMessages);
-    debugLog("Replaying hidden messages", {reason, count: entries.length});
+function applyLocalEditInPlace(message: any) {
+    if (!message || typeof message !== "object") return;
 
-    for (const [key, value] of entries) {
-        const channelId = value?.channelId ?? key.split(":")[0];
-        const id = value?.id ?? key.split(":")[1];
-        dispatchDelete(channelId, id, reason);
-    }
+    const edit = getLocalEdit(message);
+    if (!edit) return;
+
+    message.content = edit.content;
 }
 
-function collectMessages(value, output = [], seen = new Set(), depth = 0) {
+function collectMessages(
+    value: any,
+    output: any[] = [],
+    seen = new Set<any>(),
+    depth = 0,
+) {
     if (!value || depth > 8 || output.length >= 200) return output;
+
     if (typeof value !== "object") return output;
     if (seen.has(value)) return output;
+
     seen.add(value);
 
     if (Array.isArray(value)) {
-        for (const item of value) collectMessages(item, output, seen, depth + 1);
+        for (const item of value) {
+            collectMessages(item, output, seen, depth + 1);
+        }
+
         return output;
     }
 
-    if (value.id && (value.channel_id || value.channelId)) {
+    if (
+        value.id &&
+        (value.channel_id || value.channelId) &&
+        (
+            typeof value.content === "string" ||
+            value.author ||
+            value.attachments
+        )
+    ) {
         output.push(value);
     }
 
@@ -151,278 +150,420 @@ function collectMessages(value, output = [], seen = new Set(), depth = 0) {
     return output;
 }
 
-function applyHiddenMessagesFromAction(action) {
-    if (!action || action.type === "MESSAGE_DELETE") return;
-
-    const hiddenMessages = ensureHiddenMessages();
-    if (Object.keys(hiddenMessages).length === 0) return;
+function applyEditsToAction(action: any) {
+    if (!action) return;
 
     const messages = collectMessages(action);
-    const hiddenMatches = messages.filter(isHiddenMessage);
-    if (hiddenMatches.length === 0) return;
 
-    debugLog("Found hidden messages in dispatcher action", {
-        type: action.type,
-        count: hiddenMatches.length,
-        messages: hiddenMatches.slice(0, 10).map(describeMessage)
-    });
-
-    for (const message of hiddenMatches) {
-        dispatchDeleteForMessage(message, `dispatcher:${action.type}`);
+    for (const message of messages) {
+        applyLocalEditInPlace(message);
     }
 }
 
-function describeValue(value) {
-    try {
-        if (value == null) return String(value);
-        if (typeof value !== "object") return `${typeof value}:${String(value)}`;
-        if (Array.isArray(value)) return `array:${value.length}`;
+function forceMessageRefresh(message: any) {
+    const channelId = getChannelId(message);
+    const id = message?.id;
 
-        const keys = Object.keys(value).slice(0, 12).join(",");
-        return `${value.constructor?.name ?? "object"}:{${keys}}`;
-    } catch (error) {
-        return `uninspectable:${error?.message ?? String(error)}`;
-    }
-}
+    if (!channelId || !id) return;
 
-function describeMessage(message) {
+    /*
+     * This is only a local UI refresh.
+     *
+     * The extra property prevents this action from being mistaken
+     * for a real Discord server update by this plugin.
+     */
     try {
-        if (!message) return "none";
-        return JSON.stringify({
-            id: message.id,
-            channel_id: message.channel_id,
-            channelId: message.channelId,
-            authorId: message.author?.id,
-            content: typeof message.content === "string" ? message.content.slice(0, 60) : undefined
+        FluxDispatcher.dispatch({
+            type: "MESSAGE_UPDATE",
+            channelId,
+            id,
+            message: applyLocalEdit(message),
+            __localMessageEdit: true,
         });
-    } catch (error) {
-        return `uninspectable:${error?.message ?? String(error)}`;
+    } catch {
+        // Discord's dispatcher can change between versions.
     }
 }
 
-function getElementName(element) {
-    try {
-        const type = element?.type;
-        if (!type) return typeof element;
-        return type.displayName || type.name || type.render?.name || type.type?.name || String(type);
-    } catch (error) {
-        return `unknown:${error?.message ?? String(error)}`;
-    }
-}
+function editMessage(message: any) {
+    const currentEdit = getLocalEdit(message);
+    const currentContent =
+        currentEdit?.content ??
+        (typeof message?.content === "string" ? message.content : "");
 
-function describeReactCandidates(root) {
-    const candidates = [];
-    const seen = new Set();
+    showInputAlert({
+        title: "Edit Message Locally",
+        initialValue: currentContent,
+        placeholder: "Message content",
+        confirmText: "Save",
+        cancelText: "Cancel",
+        onConfirm: (newContent: string) => {
+            saveLocalEdit(message, newContent);
 
-    function visit(value, path, depth) {
-        if (!value || depth > 8 || candidates.length >= 40) return;
-        if (typeof value !== "object") return;
-        if (seen.has(value)) return;
-        seen.add(value);
+            // Update the object immediately if it is currently displayed.
+            applyLocalEditInPlace(message);
 
-        if (Array.isArray(value)) {
-            const elementNames = value
-                .slice(0, 8)
-                .map((item) => getElementName(item));
-
-            if (value.length > 0 && elementNames.some((name) => name && name !== "undefined")) {
-                candidates.push({
-                    path,
-                    length: value.length,
-                    names: elementNames.join("|")
-                });
-            }
-
-            value.forEach((item, index) => visit(item, `${path}[${index}]`, depth + 1));
-            return;
-        }
-
-        if (value.props) {
-            visit(value.props.children, `${path}.props.children`, depth + 1);
-            visit(value.props, `${path}.props`, depth + 1);
-        }
-
-        for (const key of Object.keys(value).slice(0, 20)) {
-            if (key === "props" || key === "_owner" || key === "_store") continue;
-            visit(value[key], `${path}.${key}`, depth + 1);
-        }
-    }
-
-    visit(root, "root", 0);
-    return candidates;
-}
-
-function findActionRows(root) {
-    const oldMatch = findInReactTree(root, x => x?.[0]?.type?.name === "ButtonRow");
-    if (oldMatch) return {buttons: oldMatch, strategy: "ButtonRow"};
-
-    const broadMatch = findInReactTree(root, x => {
-        if (!Array.isArray(x) || x.length < 2) return false;
-
-        const names = x.map((item) => getElementName(item));
-        const hasRows = names.filter((name) =>
-            /row|button|action|pressable|touchable/i.test(name)
-        ).length >= 2;
-
-        const hasPressables = x.filter((item) =>
-            typeof item?.props?.onPress === "function" ||
-            typeof item?.props?.onLongPress === "function" ||
-            item?.props?.label ||
-            item?.props?.title
-        ).length >= 2;
-
-        return hasRows || hasPressables;
+            // Ask Discord's UI to render the local version.
+            forceMessageRefresh(message);
+        },
     });
-
-    if (broadMatch) return {buttons: broadMatch, strategy: "broad-row-array"};
-
-    return {buttons: null, strategy: "none"};
 }
 
-function HideMessageRow({message}) {
-    debugLog("Rendering HideMessageRow", describeMessage(message));
+function restoreMessage(message: any) {
+    removeLocalEdit(message);
 
-    const icon = getAssetId("ic_close_16px");
-    debugLog("Resolved icon", icon);
+    /*
+     * Remove the local override and refresh the message.
+     * The original server-side message remains untouched.
+     */
+    try {
+        FluxDispatcher.dispatch({
+            type: "MESSAGE_UPDATE",
+            channelId: getChannelId(message),
+            id: message?.id,
+            message: {
+                ...message,
+                __localMessageEdit: false,
+            },
+            __localMessageEditRestore: true,
+        });
+    } catch {
+        // Ignore dispatcher changes between Discord versions.
+    }
+}
+
+function LocalEditRow({ message }: { message: any }) {
+    const icon = getAssetId("ic_edit_24px");
 
     const onPress = () => {
-        debugLog("Hide Message pressed", describeMessage(message));
-
-        addHiddenMessage(message);
-        dispatchDeleteForMessage(message, "button-press");
-
-        LazyActionSheet.hideActionSheet();
-        debugLog("Hidden action sheet");
+        LazyActionSheet?.hideActionSheet?.();
+        editMessage(message);
     };
 
     if (ActionSheetRow) {
-        debugLog("Using ActionSheetRow");
-        return <ActionSheetRow
-            label="Hide Message"
-            icon={<ActionSheetRow.Icon
-                source={icon}
-                IconComponent={() => {
-                    debugLog("Rendering ActionSheetRow icon");
-                    return <ReactNative.Image resizeMode="cover" style={styles.icon} source={icon} />;
-                }}
-            />}
-            onPress={onPress}
-        />;
+        return (
+            <ActionSheetRow
+                label={
+                    hasLocalEdit(message)
+                        ? "Edit Local Message"
+                        : "Edit Message Locally"
+                }
+                icon={
+                    <ActionSheetRow.Icon
+                        source={icon}
+                        IconComponent={() => (
+                            <ReactNative.Image
+                                resizeMode="cover"
+                                style={styles.icon}
+                                source={icon}
+                            />
+                        )}
+                    />
+                }
+                onPress={onPress}
+            />
+        );
     }
 
     if (FormRow) {
-        debugLog("Using FormRow fallback");
-        return <FormRow
-            label="Hide Message"
-            leading={<FormRow.Icon source={icon} />}
-            onPress={onPress}
-        />;
+        return (
+            <FormRow
+                label={
+                    hasLocalEdit(message)
+                        ? "Edit Local Message"
+                        : "Edit Message Locally"
+                }
+                leading={<FormRow.Icon source={icon} />}
+                onPress={onPress}
+            />
+        );
     }
 
-    debugError("Could not find ActionSheetRow or FormRow");
     return null;
 }
 
-function onLoad() {
-    debugLog("onLoad start");
-    debugLog("Module availability", {
-        LazyActionSheet: Boolean(LazyActionSheet),
-        ActionSheetRow: Boolean(ActionSheetRow),
-        FormRow: Boolean(FormRow),
-        FluxDispatcher: Boolean(FluxDispatcher),
-        React: Boolean(React),
-        ReactNative: Boolean(ReactNative)
-    });
+function RestoreLocalEditRow({ message }: { message: any }) {
+    const icon = getAssetId("ic_refresh_24px");
 
-    if (!LazyActionSheet) {
-        debugError("Could not find LazyActionSheet");
-        return;
+    const onPress = () => {
+        LazyActionSheet?.hideActionSheet?.();
+        restoreMessage(message);
+    };
+
+    if (ActionSheetRow) {
+        return (
+            <ActionSheetRow
+                label="Restore Original Message"
+                icon={
+                    <ActionSheetRow.Icon
+                        source={icon}
+                        IconComponent={() => (
+                            <ReactNative.Image
+                                resizeMode="cover"
+                                style={styles.icon}
+                                source={icon}
+                            />
+                        )}
+                    />
+                }
+                onPress={onPress}
+            />
+        );
     }
 
-    debugLog("Index at", storage.hideMessagesIndex);
-    ensureHiddenMessages();
-    replayHiddenMessages("onLoad");
+    if (FormRow) {
+        return (
+            <FormRow
+                label="Restore Original Message"
+                leading={<FormRow.Icon source={icon} />}
+                onPress={onPress}
+            />
+        );
+    }
 
-    patches.push(after("dispatch", FluxDispatcher, ([action]) => {
-        applyHiddenMessagesFromAction(action);
-    }));
-    debugLog("Installed FluxDispatcher replay patch");
+    return null;
+}
 
-    debugLog("Installing openLazy before patch");
+function getActionRows(root: any) {
+    /*
+     * Same basic strategy as the original HideMessages plugin:
+     * locate the array containing the action-sheet buttons.
+     */
+    const match = findInTree(root, (value: any) => {
+        if (!Array.isArray(value) || value.length < 2) return false;
 
-    patches.push(before("openLazy", LazyActionSheet, ([component, key, msg]) => {
-        debugLog("openLazy called", {
-            key,
-            component: describeValue(component),
-            msg: describeValue(msg),
-            msgKeys: msg ? Object.keys(msg).join(",") : "none",
-            message: describeMessage(msg?.message)
-        });
+        const hasPressables = value.filter(
+            (item: any) =>
+                typeof item?.props?.onPress === "function" ||
+                typeof item?.props?.onLongPress === "function" ||
+                item?.props?.label ||
+                item?.props?.title,
+        ).length >= 2;
 
-        const message = msg?.message;
-        if (key != "MessageLongPressActionSheet") {
-            debugLog("Ignoring action sheet key", key);
-            return;
+        return hasPressables;
+    });
+
+    return match;
+}
+
+function findInTree(
+    root: any,
+    predicate: (value: any) => boolean,
+    seen = new Set<any>(),
+    depth = 0,
+): any {
+    if (!root || depth > 8 || seen.has(root)) return null;
+
+    seen.add(root);
+
+    try {
+        if (predicate(root)) return root;
+    } catch {
+        // Ignore malformed React nodes.
+    }
+
+    if (Array.isArray(root)) {
+        for (const child of root) {
+            const result = findInTree(child, predicate, seen, depth + 1);
+            if (result) return result;
         }
 
-        if (!message) {
-            debugError("MessageLongPressActionSheet had no msg.message", describeValue(msg));
-            return;
-        }
+        return null;
+    }
 
-        if (!component?.then) {
-            debugError("Action sheet component is not thenable", describeValue(component));
-            return;
-        }
+    if (typeof root !== "object") return null;
 
-        debugLog("Waiting for action sheet component promise", describeMessage(message));
+    if (root.props) {
+        const result = findInTree(
+            root.props.children,
+            predicate,
+            seen,
+            depth + 1,
+        );
 
-        component.then(instance => {
-            debugLog("Action sheet component resolved", describeValue(instance));
+        if (result) return result;
+    }
 
-            const unpatch = after("default", instance, (_, component) => {
-                debugLog("Action sheet default rendered", describeValue(component));
+    for (const key of Object.keys(root).slice(0, 20)) {
+        if (key === "_owner" || key === "_store") continue;
 
-                React.useEffect(() => () => {
-                    debugLog("Unpatching action sheet default");
-                    unpatch()
-                }, [])
+        const result = findInTree(
+            root[key],
+            predicate,
+            seen,
+            depth + 1,
+        );
 
-                const candidates = describeReactCandidates(component);
-                debugLog("Action sheet tree candidates", JSON.stringify(candidates));
+        if (result) return result;
+    }
 
-                const {buttons, strategy} = findActionRows(component);
-                if (buttons) debugLog("Found action row list", {strategy, length: buttons.length, names: buttons.slice(0, 8).map(getElementName).join("|")});
+    return null;
+}
 
-                if (!buttons) {
-                    debugError("Could not find action sheet button list");
-                    return
+function patchMessageStore() {
+    if (!MessageStore) return;
+
+    /*
+     * getMessage() is a useful second layer because some Discord
+     * components fetch a message directly instead of consuming the
+     * dispatcher action.
+     */
+    if (typeof MessageStore.getMessage === "function") {
+        patches.push(
+            after("getMessage", MessageStore, ([channelId, messageId], result) => {
+                if (!result) return result;
+
+                return applyLocalEdit(result);
+            }),
+        );
+    }
+
+    /*
+     * getMessages() normally returns Discord's channel message cache.
+     * We patch its get() method and common arrays without replacing
+     * Discord's cache itself.
+     */
+    if (typeof MessageStore.getMessages === "function") {
+        patches.push(
+            after("getMessages", MessageStore, ([channelId], result) => {
+                if (!result || typeof result !== "object") return result;
+
+                const originalGet = result.get;
+
+                if (typeof originalGet === "function" && !result.__localEditPatched) {
+                    result.__localEditPatched = true;
+
+                    result.get = function (messageId: string) {
+                        return applyLocalEdit(
+                            originalGet.call(this, messageId),
+                        );
+                    };
                 }
 
-                const index = Number.isFinite(Number(storage.hideMessagesIndex)) ? Number(storage.hideMessagesIndex) : 2;
-                debugLog("Inserting row", {index, beforeLength: buttons.length});
-                buttons.splice(index, 0, <HideMessageRow message={message} />)
-                debugLog("Inserted row", {afterLength: buttons.length});
-            })
-            debugLog("Installed default render patch");
-        }).catch(error => {
-            debugError("Action sheet component promise failed", error);
-        });
-    }));
+                if (Array.isArray(result._array)) {
+                    result._array = result._array.map(applyLocalEdit);
+                }
 
-    debugLog("openLazy before patch installed", patches.length);
+                if (result._map && typeof result._map === "object") {
+                    for (const id of Object.keys(result._map)) {
+                        result._map[id] = applyLocalEdit(result._map[id]);
+                    }
+                }
+
+                return result;
+            }),
+        );
+    }
+}
+
+function patchDispatcher() {
+    /*
+     * This happens before Discord's stores receive the event.
+     *
+     * If a locally edited message arrives from Discord again, we replace
+     * its visible content with our local version.
+     */
+    patches.push(
+        before("dispatch", FluxDispatcher, ([action]) => {
+            if (!action || action.__localMessageEdit) return;
+
+            applyEditsToAction(action);
+        }),
+    );
+}
+
+function patchMessageActionSheet() {
+    if (!LazyActionSheet) return;
+
+    patches.push(
+        before(
+            "openLazy",
+            LazyActionSheet,
+            ([component, key, msg]) => {
+                if (key !== "MessageLongPressActionSheet") return;
+
+                const message = msg?.message;
+
+                if (!message || !component?.then) return;
+
+                component
+                    .then((instance: any) => {
+                        const unpatch = after(
+                            "default",
+                            instance,
+                            (_args: any[], rendered: any) => {
+                                React.useEffect(
+                                    () => () => unpatch(),
+                                    [],
+                                );
+
+                                const buttons = getActionRows(rendered);
+
+                                if (!buttons) return;
+
+                                const index = Number.isFinite(
+                                    Number(storage.localEditsIndex),
+                                )
+                                    ? Number(storage.localEditsIndex)
+                                    : 2;
+
+                                const rows: any[] = [
+                                    <LocalEditRow
+                                        key={`local-edit-${message.id}`}
+                                        message={message}
+                                    />,
+                                ];
+
+                                if (hasLocalEdit(message)) {
+                                    rows.push(
+                                        <RestoreLocalEditRow
+                                            key={`local-restore-${message.id}`}
+                                            message={message}
+                                        />,
+                                    );
+                                }
+
+                                buttons.splice(index, 0, ...rows);
+                            },
+                        );
+                    })
+                    .catch(() => {
+                        // Action-sheet internals changed or failed to load.
+                    });
+            },
+        ),
+    );
+}
+
+function onLoad() {
+    if (!LazyActionSheet) return;
+
+    if (
+        typeof storage.localEditsIndex !== "string" &&
+        typeof storage.localEditsIndex !== "number"
+    ) {
+        storage.localEditsIndex = 2;
+    }
+
+    ensureLocalEdits();
+
+    patchMessageStore();
+    patchDispatcher();
+    patchMessageActionSheet();
 }
 
 export default {
     onLoad,
-    onUnload: () => {
-        debugLog("onUnload start", patches.length);
-        for (const unpatch of patches) {
-            unpatch();
-        }
-        patches = [];
-        debugLog("onUnload complete");
-    },
 
-    settings: Settings
-}
+    onUnload: () => {
+        for (const unpatch of patches) {
+            try {
+                unpatch();
+            } catch {
+                // Ignore individual patch failures.
+            }
+        }
+
+        patches = [];
+    },
+};
