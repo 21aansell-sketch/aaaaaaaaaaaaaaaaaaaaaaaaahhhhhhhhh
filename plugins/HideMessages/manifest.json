@@ -1,6 +1,6 @@
 {
-  "name": "HideMessages",
-  "description": "A Vendetta plugin for hiding messages locally.",
+  "name": "LocalEdit",
+  "description": "Edit Discord messages locally without changing them on the server.",
   "authors": [
     {
       "name": "MYSTRAVIL",
@@ -9,6 +9,6 @@
   ],
   "main": "src/index.tsx",
   "vendetta": {
-    "icon": "ic_badge_staff"
+    "icon": "ic_edit_24px"
   }
 }
